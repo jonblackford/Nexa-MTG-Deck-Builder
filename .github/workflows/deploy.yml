@@ -27,8 +27,19 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install deps
-        run: npm ci
+      - name: Install deps (robust)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --version
+          npm cache clean --force
+          rm -rf node_modules
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          test -x node_modules/.bin/vite
 
       - name: Build
         run: npm run build
