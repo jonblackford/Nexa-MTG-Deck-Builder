@@ -35,7 +35,6 @@ function Protected({ session, children }) {
 export default function App() {
   const { session, loading } = useSupabaseSession()
   const navigate = useNavigate()
-
   const userEmail = useMemo(() => session?.user?.email ?? '', [session])
 
   async function signOut() {
@@ -43,51 +42,52 @@ export default function App() {
     navigate('/login')
   }
 
-  if (loading) {
-    return (
-      <div className="appShell">
-        <div className="header">
-          <div className="brand">Commander Deckbuilder</div>
-        </div>
-        <div className="container"><div className="panel">Loading…</div></div>
-      </div>
-    )
-  }
-
   return (
-    <div className="appShell">
-      <div className="header">
-        <div className="brand">
-          <span className="pill">EDH</span>
-          Commander Deckbuilder
-        </div>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          {session ? (
-            <>
-              <span className="tag">{userEmail}</span>
-              <button className="btn" onClick={() => navigate('/app')}>Dashboard</button>
-              <button className="btn" onClick={signOut}>Log out</button>
-            </>
-          ) : (
-            <Link className="btn" to="/login">Log in</Link>
-          )}
+    <div>
+      <div className="container">
+        <div className="topbar">
+          <div className="brand" style={{ cursor: 'pointer' }} onClick={() => navigate(session ? '/app' : '/login')}>
+            <div className="logo" />
+            <div>
+              <h1 style={{ margin: 0 }}>Nexa MTG Deck Builder</h1>
+              <div className="muted" style={{ fontSize: 12 }}>Commander • Drag & Drop • Supabase</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {session ? (
+              <>
+                <span className="tag">{userEmail}</span>
+                <button className="btn" onClick={() => navigate('/app')} type="button">Dashboard</button>
+                <button className="btn" onClick={signOut} type="button">Log out</button>
+              </>
+            ) : (
+              <Link className="btn" to="/login">Log in</Link>
+            )}
+          </div>
         </div>
       </div>
 
-      <Routes>
-        <Route path="/login" element={session ? <Navigate to="/app" replace /> : <LoginPage />} />
-        <Route path="/reset" element={<ResetPasswordPage />} />
-        <Route
-          path="/app/*"
-          element={
-            <Protected session={session}>
-              <DashboardPage session={session} />
-            </Protected>
-          }
-        />
-        <Route path="/" element={<Navigate to={session ? '/app' : '/login'} replace />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      {loading ? (
+        <div className="container">
+          <div className="panel" style={{ marginTop: 14 }}>Loading…</div>
+        </div>
+      ) : (
+        <Routes>
+          <Route path="/login" element={session ? <Navigate to="/app" replace /> : <LoginPage />} />
+          <Route path="/reset" element={<ResetPasswordPage />} />
+          <Route
+            path="/app/*"
+            element={
+              <Protected session={session}>
+                <DashboardPage session={session} />
+              </Protected>
+            }
+          />
+          <Route path="/" element={<Navigate to={session ? '/app' : '/login'} replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      )}
     </div>
   )
 }

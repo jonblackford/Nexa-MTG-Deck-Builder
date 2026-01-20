@@ -5,22 +5,29 @@ import SortableCardRow from './SortableCardRow.jsx'
 
 export default function BoardColumn({ column, cards, onInc, onDec, onRemove }) {
   const ids = cards.map(c => c.id)
-  const { setNodeRef } = useDroppable({ id: column.id })
+  const { setNodeRef, isOver } = useDroppable({ id: column.id })
+
   return (
-    <div className="column" ref={setNodeRef}>
+    <div className={'column' + (isOver ? ' columnOver' : '')}>
       <div className="columnHeader">
-        <div style={{fontWeight:800}}>{column.name}</div>
-        <span className="tag">{cards.reduce((a,c)=>a+c.qty,0)}</span>
+        <div style={{ fontWeight: 900 }}>{column.name}</div>
+        <span className="tag">{cards.reduce((a, c) => a + (c.qty || 0), 0)}</span>
       </div>
-      <div className="columnBody">
+
+      <div className="columnBody" ref={setNodeRef}>
         <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-          {cards.map(row => (
+          {cards.length === 0 ? (
+            <div className="columnEmpty">Drop cards here</div>
+          ) : null}
+
+          {cards.map((row, idx) => (
             <SortableCardRow
               key={row.id}
               cardRow={row}
               onInc={onInc}
               onDec={onDec}
               onRemove={onRemove}
+              stackIndex={idx}
             />
           ))}
         </SortableContext>
