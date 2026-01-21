@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -6,13 +6,13 @@ import {
   closestCorners,
   useSensor,
   useSensors,
-  } from '@dnd-kit/core',
-  import { arrayMove } from '@dnd-kit/sortable',
-  import { supabase } from '../lib/supabase',
-  import BoardColumn from './BoardColumn.jsx',
-  import SearchModal from './SearchModal.jsx',
-  import ImportModal from './ImportModal.jsx',
-  import {,
+} from '@dnd-kit/core';
+import { arrayMove } from '@dnd-kit/sortable';
+import { supabase } from '../lib/supabase';
+import BoardColumn from './BoardColumn.jsx';
+import SearchModal from './SearchModal.jsx';
+import ImportModal from './ImportModal.jsx';
+import {
   buildDecklistText,
   manaValue,
   parseManaPips,
@@ -27,7 +27,8 @@ import {
   scryfallImage,
   slugifyEdhrec,
   oracleAllowsAnyNumber,
-} from './helpers'
+} from './helpers';
+
 
 function snapshotScryfallCard(card) {
   // Store the useful bits for offline display + analytics
