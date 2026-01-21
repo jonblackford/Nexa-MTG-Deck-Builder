@@ -3,19 +3,34 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
-  pointerWithin,
+  closestCorners,
   useSensor,
   useSensors,
-} from '@dnd-kit/core'
-import { arrayMove } from '@dnd-kit/sortable'
-
-import { supabase } from '../lib/supabase'
-import BoardColumn from './BoardColumn.jsx'
-import SearchPanel from './SearchPanel.jsx'
-import CardTile from './CardTile.jsx'
-import { buildDecklistText, manaValue, parseManaPips, scryfallPriceUSD, categorizeByType } from './helpers'
+  } from '@dnd-kit/core',
+  import { arrayMove } from '@dnd-kit/sortable',
+  import { supabase } from '../lib/supabase',
+  import BoardColumn from './BoardColumn.jsx',
+  import SearchModal from './SearchModal.jsx',
+  import ImportModal from './ImportModal.jsx',
+  import {,
+  buildDecklistText,
+  manaValue,
+  parseManaPips,
+  scryfallPriceUSD,
+  allowedCopiesInCommander,
+  colorIdentityLabel,
+  getColorIdentity,
+  isCommanderEligible,
+  isSubsetColors,
+  isBasicLand,
+  categorizeByType,
+  scryfallImage,
+  slugifyEdhrec,
+  oracleAllowsAnyNumber,
+} from './helpers'
 
 function snapshotScryfallCard(card) {
+  // Store the useful bits for offline display + analytics
   return {
     id: card?.id,
     name: card?.name,
@@ -37,56 +52,13 @@ function sumQty(rows) {
   return (rows || []).reduce((a, r) => a + (r.qty || 0), 0)
 }
 
-function safeNum(v) {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : 0
-}
-
-function normalizeName(name) {
-  return (name || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim()
-}
-
-function isBasicLand(snap) {
-  const t = (snap?.type_line || '').toLowerCase()
-  return t.includes('basic') && t.includes('land')
-}
-
-function allowedCopies(snap) {
-  if (!snap?.name) return 1
-  if (isBasicLand(snap)) return Infinity
-
-  const oracle = (snap?.oracle_text || '')
-  if (/A deck can have any number of cards named/i.test(oracle)) return Infinity
-
-  const n = normalizeName(snap.name)
-  if (n === 'seven dwarves') return 7
-  if (n === 'nazgul' || n === 'nazgûl') return 9
-  return 1
-}
-
-function isCommanderCandidateSnap(snap) {
-  const t = (snap?.type_line || '').toLowerCase()
-  if (!t.includes('legendary')) return false
-  if (t.includes('creature')) return true
-  if (t.includes('planeswalker')) return true
-  return false
-}
-
-function subsetColorIdentity(cardCI = [], cmdCI = []) {
-  const cmd = new Set(cmdCI || [])
-  for (const c of (cardCI || [])) {
-    if (!cmd.has(c)) return false
-  }
-  return true
-}
-
-function isLandRow(row) {
+function isLand(row) {
   const t = (row?.card_snapshot?.type_line || '').toLowerCase()
   return t.includes('land')
+}
+
+function isSpell(row) {
+  return !isLand(row)
 }
 
 function detectRamp(row) {
@@ -112,9 +84,13 @@ function curveBucket(mv) {
   return String(mv)
 }
 
+function safeNum(v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
 export default function DeckBoard({ session, deckId }) {
   const userId = session.user.id
-
   const [deck, setDeck] = useState(null)
   const [columns, setColumns] = useState([])
   const [cards, setCards] = useState([]) // deck_cards rows
@@ -122,39 +98,15 @@ export default function DeckBoard({ session, deckId }) {
   const [err, setErr] = useState('')
   const [saving, setSaving] = useState(false)
   const [view, setView] = useState('board') // board | list
-
-  const [activeId, setActiveId] = useState(null)
-  const [lastOverId, setLastOverId] = useState(null)
-  const [transientMsg, setTransientMsg] = useState('')
-
   const [comboBusy, setComboBusy] = useState(false)
   const [comboErr, setComboErr] = useState('')
   const [comboResults, setComboResults] = useState(null)
-  const [autoFixDupes, setAutoFixDupes] = useState(true)
-  const [autoMoveIncompatible, setAutoMoveIncompatible] = useState(true)
-  const [autoSwapCommander, setAutoSwapCommander] = useState(true)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchPreset, setSearchPreset] = useState('')
   const [importOpen, setImportOpen] = useState(false)
-  const [importText, setImportText] = useState('')
-  const [importBusy, setImportBusy] = useState(false)
-  const [importLog, setImportLog] = useState([])
+  const [activeDragId, setActiveDragId] = useState(null)
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 2 } }))
-
-  const commanderColumnId = useMemo(() => {
-    const hit = (columns || []).find(c => (c.name || '').toLowerCase().includes('commander'))
-    return hit?.id || null
-  }, [columns])
-
-  const commanderRow = useMemo(() => {
-    if (!commanderColumnId) return null
-    const rows = cards.filter(r => r.column_id === commanderColumnId)
-    return rows[0] || null
-  }, [cards, commanderColumnId])
-
-  const commanderCI = useMemo(() => {
-    const ci = commanderRow?.card_snapshot?.color_identity || []
-    return Array.isArray(ci) ? ci : []
-  }, [commanderRow])
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
 
   async function loadAll() {
     setLoading(true)
@@ -193,9 +145,14 @@ export default function DeckBoard({ session, deckId }) {
 
   useEffect(() => {
     loadAll()
+    // Live updates (optional). If you don't want realtime, you can delete this.
     const channel = supabase
       .channel(`deck_${deckId}_changes`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deck_cards', filter: `deck_id=eq.${deckId}` }, () => loadAll())
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'deck_cards', filter: `deck_id=eq.${deckId}` },
+        () => loadAll()
+      )
       .subscribe()
 
     return () => {
@@ -217,70 +174,90 @@ export default function DeckBoard({ session, deckId }) {
       if (!map[row.column_id]) map[row.column_id] = []
       map[row.column_id].push(row)
     }
-    for (const k of Object.keys(map)) map[k].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    for (const k of Object.keys(map)) {
+      map[k].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    }
     return map
   }, [cards, columns])
 
-  // --- Validation (color identity + duplicates) ---
-  const deckChecks = useMemo(() => {
-    const issues = { color: [], dupes: [] }
+  const commanderColumn = useMemo(
+    () => columns.find(c => (c.name || '').toLowerCase() === 'commander') || null,
+    [columns]
+  )
+  const commanderColId = commanderColumn?.id || null
+  
+const commanderRows = useMemo(() => {
+  if (!commanderColId) return []
+  const rows = cardsByColumn[commanderColId] || []
+  return rows.slice(0, 2)
+}, [cardsByColumn, commanderColId])
 
-    if (commanderRow && commanderCI) {
-      for (const r of cards) {
-        if (r.id === commanderRow.id) continue
-        const snap = r.card_snapshot || {}
-        const ok = subsetColorIdentity(snap.color_identity || [], commanderCI)
-        if (!ok) {
-          issues.color.push(r)
-        }
-      }
-    }
+const commanderRow = useMemo(() => commanderRows[0] || null, [commanderRows])
 
-    const counts = new Map()
+const commanderColors = useMemo(() => {
+  const s = new Set()
+  for (const r of commanderRows) {
+    for (const c of getColorIdentity(r?.card_snapshot)) s.add(c)
+  }
+  return Array.from(s)
+}, [commanderRows])
+
+  const nameCounts = useMemo(() => {
+    const m = new Map()
     for (const r of cards) {
-      const name = r?.card_snapshot?.name
+      const name = (r.card_snapshot?.name || '').trim()
       if (!name) continue
-      const key = normalizeName(name)
-      counts.set(key, (counts.get(key) || 0) + (r.qty || 0))
+      m.set(name, (m.get(name) || 0) + (r.qty || 0))
     }
+    return m
+  }, [cards])
+
+  const deckIssues = useMemo(() => {
+    const illegalColor = []
+    const illegalCopies = []
+
+    const commanderSet = !!commanderRow
+    const cmdColors = commanderColors
 
     for (const r of cards) {
       const snap = r.card_snapshot || {}
-      const key = normalizeName(snap.name)
-      const total = counts.get(key) || 0
-      const limit = allowedCopies(snap)
-      if (total > limit) {
-        issues.dupes.push({ row: r, total, limit })
+      const name = (snap.name || '').trim()
+      if (!name) continue
+
+      // Commander slot rules
+      if (commanderColId && r.column_id === commanderColId) {
+        if (!isCommanderEligible(snap)) {
+          illegalColor.push({ row: r, reason: 'Not commander-eligible.' })
+        }
+        if ((r.qty || 0) > 1) {
+          illegalCopies.push({ name, qty: r.qty, allowed: 1, row: r })
+        }
+        continue
+      }
+
+      if (commanderSet) {
+        const colors = getColorIdentity(snap)
+        if (!isSubsetColors(colors, cmdColors)) {
+          illegalColor.push({ row: r, reason: `Color identity ${colorIdentityLabel(colors)} not allowed in ${colorIdentityLabel(cmdColors)}.` })
+        }
+      }
+
+      const allowed = allowedCopiesInCommander(snap)
+      const qty = nameCounts.get(name) || 0
+      if (allowed !== Infinity && qty > allowed) {
+        illegalCopies.push({ name, qty, allowed, row: r })
       }
     }
 
-    // Deduplicate dupes by name
-    const seen = new Set()
-    issues.dupes = issues.dupes.filter(d => {
-      const k = normalizeName(d.row?.card_snapshot?.name)
-      if (seen.has(k)) return false
-      seen.add(k)
-      return true
-    })
-
-    return issues
-  }, [cards, commanderRow, commanderCI])
-
-  // Map of rowId -> dupe info for quick lookup in UI
-  const dupeMap = useMemo(() => {
-    const m = new Map()
-    for (const d of deckChecks.dupes) {
-      if (d.row && d.row.id) m.set(d.row.id, { total: d.total, limit: d.limit })
-    }
-    return m
-  }, [deckChecks])
+    return { illegalColor, illegalCopies }
+  }, [cards, commanderColId, commanderColors, commanderRow, nameCounts])
 
   const deckStats = useMemo(() => {
     const total = sumQty(cards)
-    const lands = sumQty(cards.filter(isLandRow))
+    const lands = sumQty(cards.filter(isLand))
     const spells = total - lands
 
-    const spellRows = cards.filter(r => !isLandRow(r))
+    const spellRows = cards.filter(isSpell)
     const mvSum = spellRows.reduce((a, r) => a + (manaValue(r.card_snapshot) * (r.qty || 0)), 0)
     const avgMv = spells > 0 ? mvSum / spells : 0
 
@@ -300,152 +277,95 @@ export default function DeckBoard({ session, deckId }) {
     const ramp = sumQty(cards.filter(detectRamp))
     const draw = sumQty(cards.filter(detectDraw))
 
-    const priceTotal = cards.reduce((a, r) => a + safeNum(scryfallPriceUSD(r.card_snapshot)) * (r.qty || 0), 0)
+    const priceTotal = cards.reduce((a, r) => {
+      const p = scryfallPriceUSD(r.card_snapshot)
+      return a + safeNum(p) * (r.qty || 0)
+    }, 0)
 
     return { total, lands, spells, avgMv, curve, pips, ramp, draw, priceTotal }
   }, [cards])
 
-  function totalCopiesByName(targetName) {
-    const key = normalizeName(targetName)
-    let total = 0
-    for (const r of cards) {
-      if (normalizeName(r?.card_snapshot?.name) === key) total += (r.qty || 0)
-    }
-    return total
-  }
-
-  function assertCanAdd(snap, addingQty = 1) {
-    // Commander color identity enforcement
-    if (commanderRow && commanderCI && snap?.id !== commanderRow?.card_snapshot?.id) {
-      if (!subsetColorIdentity(snap.color_identity || [], commanderCI)) {
-        throw new Error(`“${snap.name}” is outside your commander’s color identity (${commanderCI.join('') || 'Colorless'}).`)
-      }
-    }
-
-    // Singleton enforcement
-    const limit = allowedCopies(snap)
-    const total = totalCopiesByName(snap.name) + addingQty
-    if (total > limit) {
-      const limText = limit === Infinity ? 'unlimited' : String(limit)
-      throw new Error(`Too many copies of “${snap.name}”. Limit is ${limText} in Commander.`)
-    }
-  }
-
-  async function addCardToDeck(card, columnId, opts = {}) {
+  async function addCardToDeck(card, columnId) {
     if (!columnId) return
     setErr('')
     const scryId = card?.id
     if (!scryId) return
+    try {
+      const snap = snapshotScryfallCard(card)
 
-    const snap = snapshotScryfallCard(card)
+      // Commander column special behavior
+      if (commanderColId && columnId === commanderColId) {
+        if (!isCommanderEligible(snap)) {
+          setErr('That card is not commander-eligible (must be a legendary creature/planeswalker or say “can be your commander”).')
+          return
+        }
+        // Replace existing commander (simpler UX)
+        const { error: delErr } = await supabase
+          .from('deck_cards')
+          .delete()
+          .eq('deck_id', deckId)
+          .eq('column_id', commanderColId)
+        if (delErr) throw delErr
 
-    // Commander column restrictions
-    if (columnId === commanderColumnId || opts?.setAsCommander) {
-      if (!isCommanderCandidateSnap(snap)) {
-        setErr('That card is not a valid commander (must usually be a Legendary Creature/Planeswalker).')
+        const row = {
+          user_id: userId,
+          deck_id: deckId,
+          column_id: commanderColId,
+          scryfall_id: scryId,
+          qty: 1,
+          sort_order: 0,
+          card_snapshot: snap,
+        }
+        const { error: insErr } = await supabase.from('deck_cards').insert(row)
+        if (insErr) throw insErr
         return
       }
-      if (commanderRow && (!commanderRow?.scryfall_id || commanderRow.scryfall_id !== scryId)) {
-        if (autoSwapCommander) {
-          try {
-            const sb = await findOrCreateColumn('Sideboard')
-            const { error: upErr } = await supabase
-              .from('deck_cards')
-              .update({ column_id: sb })
-              .eq('id', commanderRow.id)
-            if (upErr) throw upErr
-          } catch (e) {
-            setErr('Failed to move existing commander: ' + (e?.message || String(e)))
-            return
-          }
-        } else {
-          setErr('Commander slot already has a commander. Remove it first (or move it out) before setting a new one.')
+
+      // Color identity enforcement if commander selected
+      if (commanderRow) {
+        const colors = getColorIdentity(snap)
+        if (!isSubsetColors(colors, commanderColors)) {
+          setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
           return
         }
       }
-    }
 
-    try {
-      // If card exists anywhere in this deck, bump qty (or move if setting commander)
+      // Copy limits (Commander singleton)
+      const name = (snap.name || '').trim()
+      const allowed = allowedCopiesInCommander(snap)
+      const current = name ? (nameCounts.get(name) || 0) : 0
+      if (allowed !== Infinity && current + 1 > allowed) {
+        setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
+        return
+      }
+
+      // If card already exists in this column, bump qty.
       const { data: existing, error: exErr } = await supabase
         .from('deck_cards')
-        .select('id,qty,column_id,sort_order,card_snapshot,scryfall_id')
+        .select('id,qty')
         .eq('deck_id', deckId)
+        .eq('column_id', columnId)
         .eq('scryfall_id', scryId)
         .limit(1)
       if (exErr) throw exErr
 
-      const targetColumn = (opts?.setAsCommander && commanderColumnId) ? commanderColumnId : columnId
-
-      const hasExisting = existing && existing.length
-      // If we're only moving a card into Commander (not adding a copy), don't increment copy counts.
-      const addingQty = (hasExisting && opts?.setAsCommander) ? 0 : 1
-      // Validate against commander + copy limits BEFORE writing
-      try {
-        assertCanAdd(snap, addingQty)
-      } catch (e) {
-        const msg = e?.message || String(e)
-        if (/outside your commander/i.test(msg) && autoMoveIncompatible) {
-          const dest = await findOrCreateColumn('Incompatible')
-          await supabase.from('deck_cards').insert({
-            user_id: userId,
-            deck_id: deckId,
-            column_id: dest,
-            scryfall_id: scryId,
-            qty: 1,
-            sort_order: (cardsByColumn[dest]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1,
-            card_snapshot: snap,
-          })
-          setErr(`Moved “${snap.name}” to Incompatible column due to commander color.`)
-          return
-        }
-        if (/Too many copies/i.test(msg) && autoFixDupes) {
-          const dest = await findOrCreateColumn('Sideboard')
-          await supabase.from('deck_cards').insert({
-            user_id: userId,
-            deck_id: deckId,
-            column_id: dest,
-            scryfall_id: scryId,
-            qty: 1,
-            sort_order: (cardsByColumn[dest]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1,
-            card_snapshot: snap,
-          })
-          setErr(`Added extra copy of “${snap.name}” to Sideboard due to copy limits.`)
-          return
-        }
-        throw e
-      }
-
-      if (hasExisting) {
+      if (existing && existing.length) {
         const row = existing[0]
-        const movingToCommander = opts?.setAsCommander && commanderColumnId
-
-        // If setting commander, move the existing row into commander column (no duplicate row)
-        if (movingToCommander && row.column_id !== commanderColumnId) {
-          const nextSort = (cardsByColumn[commanderColumnId]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1
-          const { error: upErr } = await supabase
-            .from('deck_cards')
-            .update({ column_id: commanderColumnId, sort_order: nextSort })
-            .eq('id', row.id)
-          if (upErr) throw upErr
+        const nextQty = (row.qty || 0) + 1
+        if (allowed !== Infinity && current + 1 > allowed) {
+          setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
           return
         }
-
-        // Otherwise, just bump qty
-        const { error: upErr } = await supabase
-          .from('deck_cards')
-          .update({ qty: (row.qty || 0) + 1 })
-          .eq('id', row.id)
+        const { error: upErr } = await supabase.from('deck_cards').update({ qty: nextQty }).eq('id', row.id)
         if (upErr) throw upErr
         return
       }
 
-      // Insert new row
-      const nextSort = (cardsByColumn[targetColumn]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1
+      const nextSort = (cardsByColumn[columnId]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1
       const row = {
         user_id: userId,
         deck_id: deckId,
-        column_id: targetColumn,
+        column_id: columnId,
         scryfall_id: scryId,
         qty: 1,
         sort_order: nextSort,
@@ -458,95 +378,35 @@ export default function DeckBoard({ session, deckId }) {
     }
   }
 
-  async function inc(row) {
-    try {
-      const snap = row?.card_snapshot || {}
-      assertCanAdd(snap, 1)
-      const { error } = await supabase.from('deck_cards').update({ qty: (row.qty || 0) + 1 }).eq('id', row.id)
-      if (error) setErr(error.message)
-    } catch (e) {
-      setErr(e?.message ?? String(e))
+  async function setCommander(card) {
+    if (!commanderColId) {
+      setErr('No Commander column found in this deck.')
+      return
     }
+    await addCardToDeck(card, commanderColId)
   }
 
-  async function findOrCreateColumn(name) {
-    const hit = (columns || []).find(c => (c.name || '').toLowerCase() === (name || '').toLowerCase())
-    if (hit) return hit.id
-    // create a new column at end
-    const nextOrder = (columns?.reduce((m, c) => Math.max(m, c.column_order ?? 0), -1) ?? -1) + 1
-    const { data: ins, error: insErr } = await supabase.from('deck_columns').insert({ deck_id: deckId, name, column_order: nextOrder }).select('id')
-    if (insErr) throw insErr
-    const newId = ins?.[0]?.id
-    if (newId) await loadAll()
-    return newId
-  }
+  async function inc(row) {
+    const snap = row.card_snapshot || {}
+    const name = (snap.name || '').trim()
+    const allowed = allowedCopiesInCommander(snap)
+    const current = name ? (nameCounts.get(name) || 0) : 0
+    if (allowed !== Infinity && current + 1 > allowed) {
+      setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
+      return
+    }
 
-  function findColumnIdByName(name) {
-    if (!name) return columns?.[0]?.id || null
-    const hit = (columns || []).find(c => (c.name || '').toLowerCase() === (name || '').toLowerCase())
-    return hit?.id || (columns?.[0]?.id ?? null)
-  }
-
-  function exportDeckTXT() {
-    const text = buildDecklistText(cards)
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${deck?.name || 'deck'}.txt`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-  }
-
-  function exportDeckJSON() {
-    const data = { meta: deck, cards }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${deck?.name || 'deck'}.json`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-  }
-
-  async function runImportText() {
-    if (!importText) return
-    setImportBusy(true)
-    setImportLog([])
-    const lines = importText.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-    for (const line of lines) {
-      const m = line.match(/^\s*(\d+)x?\s+(.*)$/i)
-      const qty = m ? Number(m[1]) : 1
-      const name = m ? m[2].trim() : line
-      try {
-        const q = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}`
-        let cardRes = await fetch(q)
-        let cardJson = await cardRes.json()
-        if (!cardRes.ok) {
-          const sUrl = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(name)}&unique=cards&order=name`
-          const sres = await fetch(sUrl)
-          const sjson = await sres.json()
-          if (sres.ok && sjson?.data && sjson.data.length) cardJson = sjson.data[0]
-          else throw new Error(sjson?.details || 'Card not found')
-        }
-
-        for (let i = 0; i < qty; i++) {
-          const colName = categorizeByType(cardJson)
-          const colId = findColumnIdByName(colName)
-          await addCardToDeck(cardJson, colId)
-        }
-        setImportLog(l => [...l, `Added ${qty} × ${name}`])
-      } catch (e) {
-        setImportLog(l => [...l, `Failed: ${line} — ${e?.message || e}`])
+    // Color identity check (non-commander slot)
+    if (commanderRow && commanderColId && row.column_id !== commanderColId) {
+      const colors = getColorIdentity(snap)
+      if (!isSubsetColors(colors, commanderColors)) {
+        setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
+        return
       }
     }
-    setImportBusy(false)
-    setImportOpen(false)
-    await loadAll()
+
+    const { error } = await supabase.from('deck_cards').update({ qty: (row.qty || 0) + 1 }).eq('id', row.id)
+    if (error) setErr(error.message)
   }
 
   async function dec(row) {
@@ -565,25 +425,12 @@ export default function DeckBoard({ session, deckId }) {
     if (error) setErr(error.message)
   }
 
-  async function fixDuplicate(row, limit) {
-    try {
-      const qty = row.qty || 0
-      if (qty <= limit) return
-      const newQty = limit === Infinity ? qty : limit
-      const { error } = await supabase.from('deck_cards').update({ qty: newQty }).eq('id', row.id)
-      if (error) throw error
-      // reflect locally
-      setCards(cards.map(c => (c.id === row.id ? { ...c, qty: newQty } : c)))
-    } catch (e) {
-      setErr(e?.message ?? String(e))
-    }
-  }
-
   function findCardRowById(id) {
     return cards.find(r => r.id === id)
   }
 
   function getContainerIdFor(itemId) {
+    // itemId could be a card row id or a column id
     if (columnsById.has(itemId)) return itemId
     const row = findCardRowById(itemId)
     return row?.column_id || null
@@ -610,121 +457,91 @@ export default function DeckBoard({ session, deckId }) {
   }
 
   function onDragStart(event) {
-    setActiveId(event?.active?.id || null)
-  }
-
-  function onDragOver(event) {
-    const overId = event?.over?.id || null
-    if (overId !== lastOverId) setLastOverId(overId)
-
-    // If hovering over commander column and it's not allowed, show transient message
-    if (activeId && overId) {
-      // Resolve the target column id (overId might be a row)
-      const targetColId = columnsById.has(overId) ? overId : getContainerIdFor(overId)
-      const col = columnsById.get(targetColId)
-      const moving = findCardRowById(activeId)
-      if (col && moving) {
-        const snap = moving.card_snapshot || {}
-
-        // 1) Commander column rules
-        if (col.id === commanderColumnId && moving.column_id !== commanderColumnId) {
-          if (!isCommanderCandidateSnap(snap)) {
-            setTransientMsg('Cannot place this card as commander')
-            setTimeout(() => setTransientMsg(''), 2200)
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-            } catch (e) {
-              setActiveId(null)
-            }
-            return
-          }
-          if (commanderRow && commanderRow.id !== moving.id) {
-            setTransientMsg('Commander slot already occupied')
-            setTimeout(() => setTransientMsg(''), 2200)
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-            } catch (e) {
-              setActiveId(null)
-            }
-            return
-          }
-        }
-
-        // 2) Incompatible with commander color identity — only allowed into Incompatible column
-        if (commanderRow && commanderCI && !subsetColorIdentity(snap.color_identity || [], commanderCI)) {
-          const name = (col.name || '').toLowerCase()
-          if (name !== 'incompatible') {
-            setTransientMsg('Card is outside commander color identity')
-            setTimeout(() => setTransientMsg(''), 2200)
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-            } catch (e) {
-              setActiveId(null)
-            }
-            return
-          }
-        }
-
-        // 3) Duplicate / copy-limit issues — encourage dropping into Sideboard
-        const total = totalCopiesByName(snap.name)
-        const limit = allowedCopies(snap)
-        if (limit !== Infinity && total > limit) {
-          const name = (col.name || '').toLowerCase()
-          if (name !== 'sideboard') {
-            setTransientMsg('Too many copies — drop into Sideboard')
-            setTimeout(() => setTransientMsg(''), 2200)
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-            } catch (e) {
-              setActiveId(null)
-            }
-            return
-          }
-        }
-      }
-    }
+    setActiveDragId(event.active?.id || null)
   }
 
   function onDragCancel() {
-    setActiveId(null)
-    setTransientMsg('')
+    setActiveDragId(null)
   }
 
   async function onDragEnd(event) {
     const { active, over } = event
-    setActiveId(null)
+    setActiveDragId(null)
     if (!over) return
-    const activeId2 = active.id
+    const activeId = active.id
     const overId = over.id
-    if (activeId2 === overId) return
+    if (activeId === overId) return
 
-    const fromCol = getContainerIdFor(activeId2)
+    const fromCol = getContainerIdFor(activeId)
     const toCol = getContainerIdFor(overId)
     if (!fromCol || !toCol) return
-
-    const moving = findCardRowById(activeId2)
-    if (!moving) return
-
-    // Commander column rules on drag/drop
-    if (toCol === commanderColumnId && fromCol !== commanderColumnId) {
-      const snap = moving.card_snapshot || {}
-      if (!isCommanderCandidateSnap(snap)) {
-        setErr('Only a valid commander can be moved into the Commander column (usually Legendary Creature/Planeswalker).')
-        return
-      }
-      if (commanderRow) {
-        setErr('Commander slot already has a commander. Remove/move it out first.')
-        return
-      }
-    }
 
     const fromList = [...(cardsByColumn[fromCol] || [])]
     const toList = fromCol === toCol ? fromList : [...(cardsByColumn[toCol] || [])]
 
-    const activeIndex = fromList.findIndex(r => r.id === activeId2)
+    const activeIndex = fromList.findIndex(r => r.id === activeId)
     if (activeIndex < 0) return
+    const moving = fromList[activeIndex]
 
-    // insertion index
+    // Rules enforcement
+    if (commanderColId && toCol === commanderColId) {
+      const snap = moving.card_snapshot || {}
+      if (!isCommanderEligible(snap)) {
+        setErr('That card is not commander-eligible. Only a legendary creature/planeswalker (or "can be your commander") can go in Commander.')
+        return
+      }
+      
+const existingCommander = (cardsByColumn[commanderColId] || []).find(r => r.id !== moving.id)
+if (existingCommander && fromCol !== commanderColId) {
+  // Replace commander by moving this existing row into Commander, and clearing previous commander rows.
+  try {
+    setSaving(true)
+    // remove current commander rows
+    const { error: delErr } = await supabase
+      .from('deck_cards')
+      .delete()
+      .eq('deck_id', deckId)
+      .eq('column_id', commanderColId)
+    if (delErr) throw delErr
+
+    // Update moving row into commander column
+    const { error: upErr } = await supabase
+      .from('deck_cards')
+      .update({ column_id: commanderColId, sort_order: 0 })
+      .eq('id', moving.id)
+    if (upErr) throw upErr
+
+    // Reindex old column after removing moving
+    const oldList = (cardsByColumn[fromCol] || []).filter(r => r.id !== moving.id)
+    const reindex = oldList.map((r, idx) => ({ ...r, column_id: fromCol, sort_order: idx }))
+    await persistReorder(reindex)
+
+    // Update local state
+    const updatedMap = new Map([[moving.id, { ...moving, column_id: commanderColId, sort_order: 0 }]])
+    const nextCards = cards
+      .filter(r => !(r.column_id === commanderColId)) // removed old commander rows
+      .map(r => (updatedMap.has(r.id) ? { ...r, ...updatedMap.get(r.id) } : r))
+    setCards(nextCards)
+    setErr('')
+  } catch (e) {
+    setErr(e?.message ?? String(e))
+  } finally {
+    setSaving(false)
+  }
+  return
+}
+    }
+
+    if (commanderRow && commanderColId && toCol !== commanderColId) {
+      const snap = moving.card_snapshot || {}
+      const colors = getColorIdentity(snap)
+      if (!isSubsetColors(colors, commanderColors)) {
+        setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
+        return
+      }
+    }
+
+    // Determine insertion index
     let overIndex = -1
     if (columnsById.has(overId)) {
       overIndex = toList.length
@@ -739,28 +556,44 @@ export default function DeckBoard({ session, deckId }) {
     if (fromCol === toCol) {
       newFrom = arrayMove(fromList, activeIndex, overIndex)
     } else {
-      newFrom = fromList.filter(r => r.id !== activeId2)
+      newFrom = fromList.filter(r => r.id !== activeId)
       const movedRow = { ...moving, column_id: toCol }
       newTo = [...toList]
       newTo.splice(overIndex, 0, movedRow)
     }
 
+    // Recompute sort orders
     const updated = []
-    newFrom.forEach((r, idx) => updated.push({ ...r, column_id: fromCol, sort_order: idx }))
+    newFrom.forEach((r, idx) => {
+      if ((r.sort_order ?? 0) !== idx || r.column_id !== fromCol) {
+        updated.push({ ...r, column_id: fromCol, sort_order: idx })
+      }
+    })
     if (fromCol !== toCol) {
-      newTo.forEach((r, idx) => updated.push({ ...r, column_id: toCol, sort_order: idx }))
+      newTo.forEach((r, idx) => {
+        if ((r.sort_order ?? 0) !== idx || r.column_id !== toCol) {
+          updated.push({ ...r, column_id: toCol, sort_order: idx })
+        }
+      })
     }
 
+    // Update local state optimistically
     const updatedMap = new Map(updated.map(r => [r.id, r]))
     const nextCards = cards.map(r => (updatedMap.has(r.id) ? { ...r, ...updatedMap.get(r.id) } : r))
+    // If we moved across columns, the moved card in nextCards might still be in old column_id in state
+    if (fromCol !== toCol) {
+      // ensure moved row column_id is updated
+      const moved = updated.find(r => r.id === moving.id)
+      if (moved) {
+        for (let i = 0; i < nextCards.length; i++) {
+          if (nextCards[i].id === moved.id) nextCards[i] = { ...nextCards[i], column_id: moved.column_id, sort_order: moved.sort_order }
+        }
+      }
+    }
     setCards(nextCards)
 
+    // Persist
     await persistReorder(updated)
-  }
-
-  // pass dupe fix handler into child tiles
-  function handleFixDuplicate(row, limit) {
-    fixDuplicate(row, limit)
   }
 
   const decklistText = useMemo(() => buildDecklistText(cards), [cards])
@@ -769,6 +602,7 @@ export default function DeckBoard({ session, deckId }) {
     try {
       await navigator.clipboard.writeText(decklistText)
     } catch {
+      // fallback
       const ta = document.createElement('textarea')
       ta.value = decklistText
       document.body.appendChild(ta)
@@ -781,14 +615,113 @@ export default function DeckBoard({ session, deckId }) {
   async function openSpellbook() {
     await copyDecklist()
     window.open('https://commanderspellbook.com/find-my-combos/', '_blank', 'noopener,noreferrer')
-    setComboErr('Decklist copied to clipboard. Paste it into Commander Spellbook to find combos.')
+    setComboErr('Decklist copied to clipboard. Paste it into Commander Spellbook.')
   }
 
-  async function findCombos() {
+  
+  async function openEdhrecRecs() {
+    await copyDecklist()
+    window.open('https://edhrec.com/recs', '_blank', 'noopener,noreferrer')
+    setErr('Decklist copied to clipboard. Paste it into EDHREC Recs.')
+  }
+
+  function openEdhrecStaples() {
+    const cmdName = (commanderRows?.[0]?.card_snapshot?.name || '').trim()
+    if (!cmdName) {
+      setErr('Set a commander first to open EDHREC staples.')
+      return
+    }
+    const slug = slugifyEdhrec(cmdName)
+    window.open(`https://edhrec.com/commanders/${slug}/staples`, '_blank', 'noopener,noreferrer')
+  }
+
+  function openPrintSheets() {
+    const imgs = []
+    for (const r of cards) {
+      const snap = r.card_snapshot || {}
+      const url = scryfallImage(snap)
+      if (!url) continue
+      const qty = Math.max(1, r.qty || 1)
+      for (let i = 0; i < qty; i++) imgs.push({ name: snap.name || 'Card', url })
+    }
+    if (!imgs.length) {
+      setErr('No card images available to print.')
+      return
+    }
+
+    const perPage = 9
+    const pages = []
+    for (let i = 0; i < imgs.length; i += perPage) pages.push(imgs.slice(i, i + perPage))
+
+    const pageHtml = pages.map(page => {
+      const cells = page.map(it => `<div class="cell"><img src="${it.url}" alt="${it.name}"/></div>`).join('')
+      return `<div class="page"><div class="grid">${cells}</div></div>`
+    }).join('')
+
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"/>
+<title>Proxy Sheets</title>
+<style>
+  body{ margin:0; padding:18px; font-family: ui-sans-serif, system-ui; background:#fff; color:#111;}
+  .toolbar{ position: sticky; top:0; background:#fff; padding:10px 0; display:flex; gap:10px; align-items:center; }
+  .btn{ padding:8px 12px; border:1px solid #ddd; border-radius:10px; background:#f7f7f7; cursor:pointer; }
+  .page{ page-break-after: always; margin: 12px 0; }
+  .grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
+  img{ width: 100%; height: auto; border-radius: 8px; border:1px solid #ddd; }
+  @media print {.toolbar{display:none;} body{padding:0.25in;} .page{margin:0;}}
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="btn" onclick="window.print()">Print</button>
+    <button class="btn" onclick="window.close()">Close</button>
+    <div style="color:#444">Deck proxies for personal play/testing.</div>
+  </div>
+  ${pageHtml}
+</body></html>`
+
+    const w = window.open('', '_blank', 'noopener,noreferrer')
+    if (!w) { setErr('Popup blocked. Allow popups to print proxy sheets.'); return }
+    w.document.open()
+    w.document.write(html)
+    w.document.close()
+  }
+
+  async function importDecklist(lines) {
+    if (!lines?.length) return
+    setErr('')
+    const errs = []
+    for (const line of lines) {
+      const name = (line?.name || '').trim()
+      const qty = Math.max(1, Number(line?.qty || 1))
+      if (!name) continue
+      try {
+        const url = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`
+        const res = await fetch(url)
+        const js = await res.json()
+        if (!res.ok) throw new Error(js?.details || js?.message || 'Not found')
+        // Add qty copies (addCardToDeck handles singleton rules and basic lands)
+        for (let i = 0; i < qty; i++) {
+          const colName = categorizeByType(js)
+          const colId = (columns || []).find(c => c.name === colName)?.id || columns?.[0]?.id
+          await addCardToDeck(js, colId)
+        }
+      } catch (e) {
+        errs.push(`${name}: ${e?.message ?? String(e)}`)
+      }
+      // light rate limit
+      await new Promise(r => setTimeout(r, 120))
+    }
+    if (errs.length) setErr(`Import completed with some errors:\n${errs.slice(0, 10).join('\n')}`)
+  }
+
+async function findCombos() {
     setComboBusy(true)
     setComboErr('')
     setComboResults(null)
     try {
+      // This endpoint may be blocked by CORS depending on their config.
+      // If it fails, we show a fallback.
       const res = await fetch('https://backend.commanderspellbook.com/find-my-combos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -807,8 +740,6 @@ export default function DeckBoard({ session, deckId }) {
     }
   }
 
-  const activeRow = useMemo(() => (activeId ? findCardRowById(activeId) : null), [activeId, cards])
-
   if (loading) {
     return (
       <div className="grid">
@@ -818,10 +749,10 @@ export default function DeckBoard({ session, deckId }) {
     )
   }
 
-  if (err && !deck) {
+  if (err) {
     return (
       <div className="panel">
-        <div className="row" style={{ alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
           <div>
             <div style={{ fontWeight: 800 }}>Couldn’t load deck</div>
             <div className="muted" style={{ marginTop: 6 }}>{err}</div>
@@ -836,40 +767,80 @@ export default function DeckBoard({ session, deckId }) {
     )
   }
 
+  const activeRow = activeDragId ? findCardRowById(activeDragId) : null
+
   return (
-    <div className="grid">
-      <div>
-        <SearchPanel columns={columns} commanderColumnId={commanderColumnId} onAddCard={addCardToDeck} />
+    <>
+      <SearchModal
+        open={searchOpen}
+        presetQuery={searchPreset}
+        onClose={() => { setSearchOpen(false); setSearchPreset('') }}
+        columns={columns}
+        onAddCard={addCardToDeck}
+        onSetCommander={setCommander}
+      />
 
-        {err ? <div className="panel" style={{ marginTop: 14 }}><div className="tag danger">{err}</div></div> : null}
+      <ImportModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImport={importDecklist}
+      />
 
-        <div className="panel" style={{ marginTop: 14 }}>
+      <div className="grid">
+        <div>
+          <div className="panel">
+            <div className="row" style={{ alignItems: 'center' }}>
+              <div>
+                <div style={{ fontWeight: 900, fontSize: 16 }}>{deck?.name || 'Deck'}</div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Format: {deck?.format || 'commander'}
+                  {commanderRow ? (
+                    <> • Commander: <b>{commanderRow.card_snapshot?.name}</b> • CI: {colorIdentityLabel(commanderColors)}</>
+                  ) : (
+                    <> • No commander set</>
+                  )}
+                </div>
+              </div>
+
+              
+<div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+  <button
+    className="btn primary"
+    onClick={() => { setSearchPreset(''); setSearchOpen(true) }}
+  >
+    Search cards
+  </button>
+  <button
+    className="btn"
+    onClick={() => { setSearchPreset('type:vehicle'); setSearchOpen(true) }}
+  >
+    Add Vehicles
+  </button>
+  <button className="btn" onClick={() => setImportOpen(true)}>Import</button>
+  <button className="btn" onClick={openPrintSheets}>Print sheets</button>
+  <button className="btn" onClick={openEdhrecRecs} disabled={!decklistText}>EDHREC Recs</button>
+  <button className="btn" onClick={openEdhrecStaples} disabled={!commanderRows?.length}>EDHREC Staples</button>
+  <button className="btn" onClick={copyDecklist} disabled={!decklistText}>Copy decklist</button>
+  <button className="btn" onClick={openSpellbook} disabled={!decklistText}>Open Spellbook</button>
+  <button className="btn" onClick={() => setView(view === 'board' ? 'list' : 'board')}>View: {view === 'board' ? 'Board' : 'List'}</button>
+  <button className="btn" onClick={loadAll}>Refresh</button>
+</div>
+            </div>
+
+            {err ? <div className="tag" style={{ marginTop: 10 }}>{err}</div> : null}
+          </div>
+
+          <div className="panel" style={{ marginTop: 14 }}>
           <div className="row" style={{ alignItems: 'center' }}>
             <h3 style={{ margin: 0 }}>Deck stats</h3>
             {saving ? <span className="tag">Saving…</span> : null}
           </div>
-
-          <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input type="checkbox" checked={autoFixDupes} onChange={(e) => setAutoFixDupes(e.target.checked)} />
-              <span className="muted">Auto-fix duplicates (move extras to Sideboard)</span>
-            </label>
-            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input type="checkbox" checked={autoMoveIncompatible} onChange={(e) => setAutoMoveIncompatible(e.target.checked)} />
-              <span className="muted">Auto-move incompatible cards</span>
-            </label>
-            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input type="checkbox" checked={autoSwapCommander} onChange={(e) => setAutoSwapCommander(e.target.checked)} />
-              <span className="muted">Auto-swap commander when setting new one</span>
-            </label>
-          </div>
-
           <div className="kpiRow" style={{ marginTop: 10 }}>
             <div className="kpi"><div className="label">Cards</div><div className="value">{deckStats.total}</div></div>
             <div className="kpi"><div className="label">Lands</div><div className="value">{deckStats.lands}</div></div>
             <div className="kpi"><div className="label">Avg MV</div><div className="value">{deckStats.avgMv.toFixed(2)}</div></div>
-            <div className="kpi"><div className="label">Ramp</div><div className="value">{deckStats.ramp}</div></div>
-            <div className="kpi"><div className="label">Draw</div><div className="value">{deckStats.draw}</div></div>
+            <div className="kpi"><div className="label">Ramp (rough)</div><div className="value">{deckStats.ramp}</div></div>
+            <div className="kpi"><div className="label">Draw (rough)</div><div className="value">{deckStats.draw}</div></div>
             <div className="kpi"><div className="label">Est. price</div><div className="value">${deckStats.priceTotal.toFixed(2)}</div></div>
           </div>
 
@@ -880,50 +851,44 @@ export default function DeckBoard({ session, deckId }) {
             Pips: W {deckStats.pips.W} • U {deckStats.pips.U} • B {deckStats.pips.B} • R {deckStats.pips.R} • G {deckStats.pips.G}
           </div>
 
-          <hr />
-
-          <div className="row" style={{ alignItems: 'center' }}>
-            <h3 style={{ margin: 0 }}>Deck checks</h3>
-            <span className="muted" style={{ fontSize: 12 }}>
-              {commanderRow ? `Commander colors: ${commanderCI.join('') || 'Colorless'}` : 'No commander set yet'}
-            </span>
-          </div>
-
-          {deckChecks.color.length ? (
-            <div style={{ marginTop: 10 }}>
-              <div className="tag danger">
-                {deckChecks.color.length} card(s) outside commander color identity.
-              </div>
-              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
-                {deckChecks.color.slice(0, 8).map(r => (
-                  <div key={r.id} className="row" style={{ alignItems: 'center' }}>
-                    <div style={{ fontWeight: 700 }}>{r.card_snapshot?.name}</div>
-                    <button className="btn btnTiny danger" onClick={() => remove(r)} type="button">Remove</button>
+          {(deckIssues.illegalColor.length > 0 || deckIssues.illegalCopies.length > 0) ? (
+            <>
+              <hr />
+              <div style={{ fontWeight: 800 }}>Deck checks</div>
+              {deckIssues.illegalColor.length > 0 ? (
+                <div style={{ marginTop: 8 }}>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>Illegal color identity:</div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {deckIssues.illegalColor.slice(0, 12).map(({ row, reason }) => (
+                      <div key={row.id} className="row" style={{ alignItems: 'center' }}>
+                        <div style={{ fontWeight: 700 }}>{row.card_snapshot?.name}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>{reason}</div>
+                        <button className="btn danger" onClick={() => remove(row)}>Remove</button>
+                      </div>
+                    ))}
                   </div>
-                ))}
-                {deckChecks.color.length > 8 ? <div className="muted" style={{ fontSize: 12 }}>…and more</div> : null}
-              </div>
-            </div>
-          ) : (
-            <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>No color identity issues detected.</div>
-          )}
+                </div>
+              ) : null}
 
-          {deckChecks.dupes.length ? (
-            <div style={{ marginTop: 12 }}>
-              <div className="tag danger">
-                Duplicate / copy-limit issues found.
-              </div>
-              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
-                {deckChecks.dupes.slice(0, 8).map(d => (
-                  <div key={d.row.id} className="row" style={{ alignItems: 'center' }}>
-                    <div style={{ fontWeight: 700 }}>{d.row.card_snapshot?.name}</div>
-                    <div className="muted" style={{ fontSize: 12 }}>x{d.total} (limit {d.limit === Infinity ? '∞' : d.limit})</div>
+              {deckIssues.illegalCopies.length > 0 ? (
+                <div style={{ marginTop: 12 }}>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>Too many copies:</div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {deckIssues.illegalCopies.slice(0, 12).map(({ name, qty, allowed, row }) => (
+                      <div key={name} className="row" style={{ alignItems: 'center' }}>
+                        <div style={{ fontWeight: 700 }}>{name}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>x{qty} (allowed {allowed === Infinity ? '∞' : allowed})</div>
+                        <button className="btn" onClick={() => dec(row)}>Fix (-1)</button>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
+                </div>
+              ) : null}
+            </>
           ) : (
-            <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>No duplicate issues detected.</div>
+            <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+              Deck checks: looks good.
+            </div>
           )}
 
           <hr />
@@ -931,20 +896,19 @@ export default function DeckBoard({ session, deckId }) {
           <div className="row" style={{ alignItems: 'center' }}>
             <h3 style={{ margin: 0 }}>Combos</h3>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn" onClick={copyDecklist} type="button">Copy decklist</button>
-              <button className="btn" onClick={openSpellbook} type="button">Open Spellbook</button>
-                <button className="btn" onClick={exportDeckTXT} type="button">Export TXT</button>
-                <button className="btn" onClick={exportDeckJSON} type="button">Export JSON</button>
-                <button className="btn" onClick={() => setImportOpen(true)} type="button">Import decklist</button>
-              <button className="btn primary" onClick={findCombos} disabled={comboBusy || !decklistText} type="button">
+              <button className="btn" onClick={copyDecklist}>Copy decklist</button>
+              <button className="btn" onClick={openSpellbook}>Open Spellbook</button>
+              <button className="btn primary" onClick={findCombos} disabled={comboBusy || !decklistText}>
                 {comboBusy ? 'Checking…' : 'Find combos'}
               </button>
             </div>
           </div>
-
           {comboErr ? (
             <div className="tag" style={{ marginTop: 10 }}>
               {comboErr}
+              <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                If this is a CORS error, use “Copy decklist” and paste it into Commander Spellbook’s “Find My Combos”.
+              </div>
             </div>
           ) : null}
 
@@ -954,97 +918,25 @@ export default function DeckBoard({ session, deckId }) {
             </pre>
           ) : (
             <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-              If combo lookup is blocked by CORS, “Open Spellbook” will still work (it copies your decklist).
+              Combo finding is wired to Commander Spellbook’s backend endpoint. If it’s blocked by CORS, you’ll still be able to export the decklist and paste it there.
             </div>
           )}
-        
-          {importOpen ? (
-            <div className="modalBackdrop" onMouseDown={() => setImportOpen(false)}>
-              <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-                <div className="modalHeader">
-                  <div>
-                    <h3 style={{ margin: 0 }}>Import decklist</h3>
-                    <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Paste lines like "4 Sol Ring" or "Sol Ring" (one per line).</div>
-                  </div>
-                  <button className="btn" onClick={() => setImportOpen(false)}>Close</button>
-                </div>
-
-                <textarea className="input" style={{ minHeight: 160, marginTop: 10 }} value={importText} onChange={(e) => setImportText(e.target.value)} />
-
-                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                  <button className="btn primary" disabled={importBusy} onClick={runImportText}>
-                    {importBusy ? 'Importing…' : 'Import'}
-                  </button>
-                  <button className="btn" onClick={() => { setImportText(''); setImportLog([]) }}>Clear</button>
-                </div>
-
-                {importLog.length ? (
-                  <div style={{ marginTop: 10 }}>
-                    <div style={{ fontWeight: 700 }}>Import log</div>
-                    <div style={{ marginTop: 6, fontSize: 13 }} className="muted">
-                      {importLog.map((l, i) => <div key={i}>{l}</div>)}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
         </div>
-      </div>
-
-      <div>
-        <div className="panel">
-          <div className="row" style={{ alignItems: 'center' }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 900, fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {deck?.name || 'Deck'}
-              </div>
-              <div className="muted" style={{ fontSize: 12 }}>
-                Format: {deck?.format || 'commander'} • {commanderRow ? `Commander: ${commanderRow.card_snapshot?.name}` : 'No commander'}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn" onClick={() => setView(view === 'board' ? 'list' : 'board')} type="button">
-                View: {view === 'board' ? 'Board' : 'List'}
-              </button>
-              <button className="btn" onClick={loadAll} type="button">Refresh</button>
-            </div>
-          </div>
         </div>
 
-        {view === 'board' ? (
-          <div className="panel" style={{ marginTop: 14 }}>
-            <div className="boardWrap">
-              <DndContext
-                sensors={sensors}
-                collisionDetection={pointerWithin}
-                onDragStart={onDragStart}
-                onDragCancel={onDragCancel}
-                onDragOver={onDragOver}
-                onDragEnd={onDragEnd}
-              >
-                <div className="board">
-                  {columns.map(col => {
-                    let dropAllowed = true
-                    let dropReason = ''
-                    if (activeRow) {
-                      const snap = activeRow.card_snapshot || {}
-                      if (col.id === commanderColumnId) {
-                        // moving within commander column is allowed
-                        if (activeRow.column_id !== commanderColumnId) {
-                          if (!isCommanderCandidateSnap(snap)) {
-                            dropAllowed = false
-                            dropReason = 'Not a valid commander (must be Legendary Creature or Planeswalker).'
-                          } else if (commanderRow && commanderRow.id !== activeRow.id) {
-                            dropAllowed = false
-                            dropReason = 'Commander slot already occupied.'
-                          }
-                        }
-                      }
-                    }
-
-                    return (
+        <div>
+          {view === 'board' ? (
+            <div className="panel">
+              <div className="boardWrap">
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCorners}
+                  onDragStart={onDragStart}
+                  onDragCancel={onDragCancel}
+                  onDragEnd={onDragEnd}
+                >
+                  <div className="board">
+                    {columns.map(col => (
                       <BoardColumn
                         key={col.id}
                         column={col}
@@ -1052,30 +944,21 @@ export default function DeckBoard({ session, deckId }) {
                         onInc={inc}
                         onDec={dec}
                         onRemove={remove}
-                        dropAllowed={dropAllowed}
-                        dropReason={dropReason}
-                        dupesMap={dupeMap}
-                        onFixDuplicate={handleFixDuplicate}
                       />
-                    )
-                  })}
-                </div>
-
-                <DragOverlay>
-                  {activeRow ? (
-                    <div style={{ position: 'relative' }}>
-                      <CardTile cardRow={activeRow} compact />
-                      {/* show transient message near overlay when present */}
-                      {transientMsg ? (
-                        <div style={{ position: 'absolute', right: -8, top: -28 }} className="tag danger">{transientMsg}</div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </DragOverlay>
-              </DndContext>
+                    ))}
+                  </div>
+                  <DragOverlay>
+                    {activeRow ? (
+                      <div className="dragOverlay">
+                        <div style={{ fontWeight: 800, marginBottom: 6 }}>{activeRow.card_snapshot?.name}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>{activeRow.card_snapshot?.type_line || ''}</div>
+                      </div>
+                    ) : null}
+                  </DragOverlay>
+                </DndContext>
+              </div>
             </div>
-          </div>
-        ) : (
+          ) : (
           <div className="panel" style={{ marginTop: 14 }}>
             <div style={{ display: 'grid', gap: 12 }}>
               {columns.map(col => {
@@ -1102,8 +985,9 @@ export default function DeckBoard({ session, deckId }) {
               })}
             </div>
           </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
+    </>
   )
 }
