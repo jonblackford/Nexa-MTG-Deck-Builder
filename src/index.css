@@ -131,24 +131,27 @@ button, input, select{font:inherit; color:inherit;}
 .deckRow:hover{background: rgba(0,0,0,0.25);}
 
 .boardWrap{
-  overflow-x:auto;
-  padding-bottom:8px;
+  overflow: visible;
+  padding-bottom: 8px;
 }
 
 .board{
-  display:flex;
-  gap:12px;
-  min-height: 540px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  align-items: start;
 }
 
+
 .column{
-  width: 280px;
-  flex: 0 0 280px;
+  min-width: 240px;
+  width: auto;
   padding:10px;
   border-radius:16px;
   border:1px solid rgba(255,255,255,0.12);
   background: rgba(0,0,0,0.18);
 }
+
 .columnHeader{display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;}
 .columnHeader .title{font-weight:700; font-size:13px;}
 .columnHeader .count{font-size:12px; color: var(--muted);}
@@ -272,7 +275,7 @@ hr{border:none; border-top:1px solid rgba(255,255,255,0.12); margin:12px 0;}
 
 
 /* --- Added: modal + search grid + thumbnails --- */
-body{overflow-x:hidden;}
+body{overflow-x:hidden; overflow-y:auto;}
 
 .modalOverlay{
   position: fixed;
@@ -365,3 +368,122 @@ body{overflow-x:hidden;}
 .cardLine{margin-top:2px; font-size:12px; color: var(--muted);}
 .cardActions{display:flex; justify-content: space-between; align-items:center; margin-top:8px; gap:8px;}
 .qtyControls{display:flex; gap:6px; align-items:center;}
+
+/* --- New image-only tiles --- */
+.cardTileImg{
+  position: relative;
+  width: 100%;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.05);
+  cursor: pointer;
+}
+.cardTileImg img{
+  display:block;
+  width:100%;
+  height:auto;
+}
+.priceBadge{
+  position:absolute;
+  bottom:10px;
+  right:10px;
+  padding:6px 10px;
+  border-radius: 999px;
+  font-weight: 900;
+  font-size: 13px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(255,255,255,0.18);
+}
+.qtyBadge{
+  position:absolute;
+  top:10px;
+  right:10px;
+  padding:6px 10px;
+  border-radius: 999px;
+  font-weight: 900;
+  font-size: 13px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(255,255,255,0.18);
+}
+
+.stackItem{ touch-action: none; }
+.dragHandle{
+  position:absolute;
+  top:10px;
+  left:10px;
+  width: 32px;
+  height: 28px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid rgba(255,255,255,0.18);
+  border-radius:12px;
+  background: rgba(0,0,0,0.55);
+  color: rgba(255,255,255,0.85);
+  cursor: grab;
+  user-select:none;
+}
+.columnEmpty{
+  border: 1px dashed rgba(255,255,255,0.22);
+  border-radius: 14px;
+  padding: 14px;
+  margin-top: 8px;
+  min-height: 120px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+/* Quick add strip */
+.quickAddGroup{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding:10px;
+  border-radius: 14px;
+  border:1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.18);
+}
+.quickAddRow{
+  display:flex;
+  flex-wrap: wrap;
+  gap:8px;
+  align-items:center;
+}
+
+/* Card detail modal */
+.cardDetail .cardDetailBody{
+  display:grid;
+  grid-template-columns: 340px 1fr;
+  gap: 14px;
+  padding: 12px;
+}
+.cardDetail .cardDetailArt img{ width:100%; border-radius: 16px; border:1px solid rgba(255,255,255,0.12); }
+.oracleBox{
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.22);
+  line-height: 1.35;
+}
+.detailActions{
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+.pillRow{ display:flex; gap:8px; flex-wrap: wrap; }
+.pill{
+  padding:6px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  font-weight: 800;
+  font-size: 12px;
+}
+.pill.good{ border-color: rgba(34,197,94,0.35); }
+
+.dragOverlay img{width:220px; border-radius:14px; display:block;}

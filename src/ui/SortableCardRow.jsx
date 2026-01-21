@@ -1,29 +1,29 @@
-import React from 'react'
-import { useSortable } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
-import CardTile from './CardTile.jsx'
+import React from 'react';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import CardTile from './CardTile.jsx';
 
-export default function SortableCardRow({ cardRow, stackIndex = 0, onInc, onDec, onRemove }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: cardRow.id })
+export default function SortableCardRow({ cardRow, stackIndex = 0, onOpen }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: cardRow.id });
+
+  const baseTransform = CSS.Transform.toString(transform);
+  // Stacked / staggered layout, but remove offsets while dragging to prevent cursor mismatch
+  const stackOffsetX = isDragging ? 0 : Math.min(stackIndex * 2, 10);
+  const stackMarginTop = isDragging ? 0 : (stackIndex === 0 ? 0 : -64);
+
   const style = {
-    transform: CSS.Transform.toString(transform),
+    transform: (`${baseTransform || ''} translateX(${stackOffsetX}px)`).replace('undefined', '').trim(),
     transition,
-    opacity: isDragging ? 0.7 : 1,
-  }
-
-  // Stacked / staggered layout
-  const stackStyle = {
-    marginTop: stackIndex === 0 ? 0 : -44,
-    transform: (`${style.transform || ''} translateX(${Math.min(stackIndex * 2, 10)}px)`).replace('undefined', '').trim(),
-    transition: style.transition,
-    opacity: style.opacity,
+    opacity: isDragging ? 0.15 : 1,
+    marginTop: stackMarginTop,
     position: 'relative',
-  }
+    zIndex: isDragging ? 50 : (10 - Math.min(stackIndex, 9)),
+  };
 
   return (
-    <div ref={setNodeRef} style={stackStyle} className="stackItem">
+    <div ref={setNodeRef} style={style} className="stackItem">
       <div {...attributes} {...listeners} className="dragHandle" title="Drag to reorder / move">⠿</div>
-      <CardTile cardRow={cardRow} onInc={onInc} onDec={onDec} onRemove={onRemove} />
+      <CardTile cardRow={cardRow} onOpen={onOpen} />
     </div>
-  )
+  );
 }

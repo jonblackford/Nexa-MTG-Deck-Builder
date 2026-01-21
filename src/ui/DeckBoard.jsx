@@ -12,6 +12,7 @@ import { supabase } from '../lib/supabase';
 import BoardColumn from './BoardColumn.jsx';
 import SearchModal from './SearchModal.jsx';
 import ImportModal from './ImportModal.jsx';
+import CardDetailModal from './CardDetailModal.jsx';
 import {
   buildDecklistText,
   manaValue,
@@ -106,6 +107,10 @@ export default function DeckBoard({ session, deckId }) {
   const [searchPreset, setSearchPreset] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   const [activeDragId, setActiveDragId] = useState(null)
+  const [detailRow, setDetailRow] = useState(null)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [quickLandQty, setQuickLandQty] = useState(10)
+
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
 
@@ -286,98 +291,84 @@ const commanderColors = useMemo(() => {
     return { total, lands, spells, avgMv, curve, pips, ramp, draw, priceTotal }
   }, [cards])
 
-  async function addCardToDeck(card, columnId) {
-    if (!columnId) return
-    setErr('')
-    const scryId = card?.id
-    if (!scryId) return
-    try {
-      const snap = snapshotScryfallCard(card)
+  async function addCardToDeck(card, columnId, qty = 1) {
+  if (!card || !columnId) return
+  const snap = snapshotScryfallCard(card)
+  const scryId = snap.scryfall_id
+  const name = (snap.name || '').trim()
+  const allowed = allowedCopiesInCommander(snap)
+  const current = name ? (nameCounts.get(name) || 0) : 0
 
-      // Commander column special behavior
-      if (commanderColId && columnId === commanderColId) {
-        if (!isCommanderEligible(snap)) {
-          setErr('That card is not commander-eligible (must be a legendary creature/planeswalker or say “can be your commander”).')
-          return
-        }
-        // Replace existing commander (simpler UX)
-        const { error: delErr } = await supabase
-          .from('deck_cards')
-          .delete()
-          .eq('deck_id', deckId)
-          .eq('column_id', commanderColId)
-        if (delErr) throw delErr
+  // Copy-limit check (singleton etc.)
+  if (allowed !== Infinity && current + qty > allowed) {
+    setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
+    return
+  }
 
-        const row = {
-          user_id: userId,
-          deck_id: deckId,
-          column_id: commanderColId,
-          scryfall_id: scryId,
-          qty: 1,
-          sort_order: 0,
-          card_snapshot: snap,
-        }
-        const { error: insErr } = await supabase.from('deck_cards').insert(row)
-        if (insErr) throw insErr
-        return
-      }
-
-      // Color identity enforcement if commander selected
-      if (commanderRow) {
-        const colors = getColorIdentity(snap)
-        if (!isSubsetColors(colors, commanderColors)) {
-          setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
-          return
-        }
-      }
-
-      // Copy limits (Commander singleton)
-      const name = (snap.name || '').trim()
-      const allowed = allowedCopiesInCommander(snap)
-      const current = name ? (nameCounts.get(name) || 0) : 0
-      if (allowed !== Infinity && current + 1 > allowed) {
-        setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
-        return
-      }
-
-      // If card already exists in this column, bump qty.
-      const { data: existing, error: exErr } = await supabase
-        .from('deck_cards')
-        .select('id,qty')
-        .eq('deck_id', deckId)
-        .eq('column_id', columnId)
-        .eq('scryfall_id', scryId)
-        .limit(1)
-      if (exErr) throw exErr
-
-      if (existing && existing.length) {
-        const row = existing[0]
-        const nextQty = (row.qty || 0) + 1
-        if (allowed !== Infinity && current + 1 > allowed) {
-          setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
-          return
-        }
-        const { error: upErr } = await supabase.from('deck_cards').update({ qty: nextQty }).eq('id', row.id)
-        if (upErr) throw upErr
-        return
-      }
-
-      const nextSort = (cardsByColumn[columnId]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1
-      const row = {
-        user_id: userId,
-        deck_id: deckId,
-        column_id: columnId,
-        scryfall_id: scryId,
-        qty: 1,
-        sort_order: nextSort,
-        card_snapshot: snap,
-      }
-      const { error: insErr } = await supabase.from('deck_cards').insert(row)
-      if (insErr) throw insErr
-    } catch (e) {
-      setErr(e?.message ?? String(e))
+  // Commander color identity check (adding to non-commander slot)
+  if (commanderRow && commanderColId && columnId !== commanderColId) {
+    const colors = getColorIdentity(snap)
+    if (!isSubsetColors(colors, commanderColors)) {
+      setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
+      return
     }
   }
+
+  setSaving(true)
+  setErr('')
+  try {
+    // Look for existing row (same card in same column)
+    const { data: existing, error: exErr } = await supabase
+      .from('deck_cards')
+      .select('id,qty,card_snapshot,column_id,sort_order,scryfall_id')
+      .eq('deck_id', deckId)
+      .eq('column_id', columnId)
+      .eq('scryfall_id', scryId)
+      .limit(1)
+
+    if (exErr) throw exErr
+
+    if (existing && existing.length) {
+      const row = existing[0]
+      const currentQty = row.qty || 0
+      const nextQty = currentQty + qty
+
+      // Optimistic local update
+      setCards(prev => prev.map(r => (r.id === row.id ? { ...r, qty: nextQty } : r)))
+
+      const { error: upErr } = await supabase.from('deck_cards').update({ qty: nextQty }).eq('id', row.id)
+      if (upErr) {
+        // revert
+        setCards(prev => prev.map(r => (r.id === row.id ? { ...r, qty: currentQty } : r)))
+        throw upErr
+      }
+      return
+    }
+
+    const nextSort = (cardsByColumn[columnId]?.reduce((m, r) => Math.max(m, r.sort_order ?? 0), -1) ?? -1) + 1
+    const row = {
+      user_id: userId,
+      deck_id: deckId,
+      column_id: columnId,
+      scryfall_id: scryId,
+      qty,
+      sort_order: nextSort,
+      card_snapshot: snap,
+    }
+
+    const { data: inserted, error: insErr } = await supabase.from('deck_cards').insert(row).select('*').single()
+    if (insErr) throw insErr
+
+    // Optimistic add
+    setCards(prev => [...prev, inserted])
+  } catch (e) {
+    setErr(e?.message ?? String(e))
+    // Fallback refresh in case state diverged
+    loadAll()
+  } finally {
+    setSaving(false)
+  }
+}
 
   async function setCommander(card) {
     if (!commanderColId) {
@@ -388,27 +379,35 @@ const commanderColors = useMemo(() => {
   }
 
   async function inc(row) {
-    const snap = row.card_snapshot || {}
-    const name = (snap.name || '').trim()
-    const allowed = allowedCopiesInCommander(snap)
-    const current = name ? (nameCounts.get(name) || 0) : 0
-    if (allowed !== Infinity && current + 1 > allowed) {
-      setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
+  const snap = row.card_snapshot || {}
+  const name = (snap.name || '').trim()
+  const allowed = allowedCopiesInCommander(snap)
+  const current = name ? (nameCounts.get(name) || 0) : 0
+  if (allowed !== Infinity && current + 1 > allowed) {
+    setErr(`Too many copies of “${name}”. Allowed: ${allowed}.`)
+    return
+  }
+
+  // Color identity check (non-commander slot)
+  if (commanderRow && commanderColId && row.column_id !== commanderColId) {
+    const colors = getColorIdentity(snap)
+    if (!isSubsetColors(colors, commanderColors)) {
+      setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
       return
     }
-
-    // Color identity check (non-commander slot)
-    if (commanderRow && commanderColId && row.column_id !== commanderColId) {
-      const colors = getColorIdentity(snap)
-      if (!isSubsetColors(colors, commanderColors)) {
-        setErr(`Illegal color identity: ${colorIdentityLabel(colors)} is not allowed in ${colorIdentityLabel(commanderColors)}.`)
-        return
-      }
-    }
-
-    const { error } = await supabase.from('deck_cards').update({ qty: (row.qty || 0) + 1 }).eq('id', row.id)
-    if (error) setErr(error.message)
   }
+
+  const currentQty = row.qty || 0
+  const newQty = currentQty + 1
+
+  // Optimistic update
+  setCards(prev => prev.map(r => (r.id === row.id ? { ...r, qty: newQty } : r)))
+  const { error } = await supabase.from('deck_cards').update({ qty: newQty }).eq('id', row.id)
+  if (error) {
+    setErr(error.message)
+    setCards(prev => prev.map(r => (r.id === row.id ? { ...r, qty: currentQty } : r)))
+  }
+}
 
   async function dec(row) {
     const newQty = (row.qty || 0) - 1
@@ -688,7 +687,28 @@ if (existingCommander && fromCol !== commanderColId) {
     w.document.close()
   }
 
-  async function importDecklist(lines) {
+  async function fetchScryfallByName(name) {
+  const url = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Card not found: ${name}`)
+  return await res.json()
+}
+
+async function quickAddByName(name, qty = 1) {
+  try {
+    setErr('')
+    const card = await fetchScryfallByName(name)
+    const type = (card?.type_line || '').toLowerCase()
+    const targetName = type.includes('land') ? 'Lands' : categorizeByType(snapshotScryfallCard(card)) || 'Creatures'
+    const col = columns.find(c => (c.name || '').toLowerCase() === targetName.toLowerCase()) || columns.find(c => (c.name || '').toLowerCase() === 'lands')
+    if (!col) throw new Error('No column found to add this card.')
+    await addCardToDeck(card, col.id, qty)
+  } catch (e) {
+    setErr(e?.message ?? String(e))
+  }
+}
+
+async function importDecklist(lines) {
     if (!lines?.length) return
     setErr('')
     const errs = []
@@ -768,7 +788,13 @@ async function findCombos() {
     )
   }
 
-  const activeRow = activeDragId ? findCardRowById(activeDragId) : null
+  
+function openDetail(row) {
+  setDetailRow(row)
+  setDetailOpen(true)
+}
+
+const activeRow = activeDragId ? findCardRowById(activeDragId) : null
 
   return (
     <>
@@ -817,6 +843,28 @@ async function findCombos() {
   >
     Add Vehicles
   </button>
+<div className="quickAddGroup">
+  <div className="muted" style={{ fontSize: 12, fontWeight: 800 }}>Quick add</div>
+  <div className="quickAddRow">
+    <input
+      className="input"
+      style={{ width: 84 }}
+      type="number"
+      min="1"
+      value={quickLandQty}
+      onChange={(e) => setQuickLandQty(Math.max(1, Number(e.target.value || 1)))}
+      title="Quantity"
+    />
+    {['Plains','Island','Swamp','Mountain','Forest','Wastes'].map(n => (
+      <button key={n} className="btn" onClick={() => quickAddByName(n, quickLandQty)}>{n}</button>
+    ))}
+    <span className="muted" style={{ fontSize: 12, marginLeft: 6 }}>Staples:</span>
+    {['Sol Ring','Arcane Signet','Command Tower'].map(n => (
+      <button key={n} className="btn" onClick={() => quickAddByName(n, 1)}>{n}</button>
+    ))}
+  </div>
+</div>
+
   <button className="btn" onClick={() => setImportOpen(true)}>Import</button>
   <button className="btn" onClick={openPrintSheets}>Print sheets</button>
   <button className="btn" onClick={openEdhrecRecs} disabled={!decklistText}>EDHREC Recs</button>
@@ -938,23 +986,19 @@ async function findCombos() {
                 >
                   <div className="board">
                     {columns.map(col => (
-                      <BoardColumn
-                        key={col.id}
+                      <BoardColumn key={col.id}
                         column={col}
                         cards={cardsByColumn[col.id] || []}
-                        onInc={inc}
-                        onDec={dec}
-                        onRemove={remove}
-                      />
+                         onOpen={openDetail} />
                     ))}
                   </div>
                   <DragOverlay>
                     {activeRow ? (
                       <div className="dragOverlay">
-                        <div style={{ fontWeight: 800, marginBottom: 6 }}>{activeRow.card_snapshot?.name}</div>
-                        <div className="muted" style={{ fontSize: 12 }}>{activeRow.card_snapshot?.type_line || ''}</div>
-                      </div>
-                    ) : null}
+                        {activeRow?.card_snapshot ? (
+                          <img src={scryfallImage(activeRow.card_snapshot)} alt={activeRow.card_snapshot?.name || 'card'} />
+                        ) : null}
+                      </div>) : null}
                   </DragOverlay>
                 </DndContext>
               </div>
