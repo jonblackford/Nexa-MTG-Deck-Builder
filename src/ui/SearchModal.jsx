@@ -16,7 +16,8 @@ function normalizeQuery(raw) {
 }
 
 function columnNameToId(columns, columnName) {
-  const hit = (columns || []).find(c => (c.name || '') === columnName)
+  const target = (columnName || '').toLowerCase()
+  const hit = (columns || []).find(c => ((c.name || '').toLowerCase() === target))
   return hit?.id || (columns?.[0]?.id ?? null)
 }
 

@@ -109,13 +109,10 @@ export default function DeckBoard({ session, deckId }) {
   const [activeDragId, setActiveDragId] = useState(null)
   const [detailRow, setDetailRow] = useState(null)
   const [detailOpen, setDetailOpen] = useState(false)
-  const [quickLandQty, setQuickLandQty] = useState(10)
-
-
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
 
-  async function loadAll() {
-    setLoading(true)
+  async function loadAll(silent = false) {
+    if (!silent) setLoading(true)
     setErr('')
     try {
       const { data: d, error: dErr } = await supabase
@@ -145,7 +142,7 @@ export default function DeckBoard({ session, deckId }) {
     } catch (e) {
       setErr(e?.message ?? String(e))
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }
 
@@ -157,7 +154,7 @@ export default function DeckBoard({ session, deckId }) {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'deck_cards', filter: `deck_id=eq.${deckId}` },
-        () => loadAll()
+        () => loadAll(true)
       )
       .subscribe()
 
@@ -357,10 +354,13 @@ const commanderColors = useMemo(() => {
     }
 
     const { data: inserted, error: insErr } = await supabase.from('deck_cards').insert(row).select('*').single()
-    if (insErr) throw insErr
+if (insErr) throw insErr
 
-    // Optimistic add
-    setCards(prev => [...prev, inserted])
+if (inserted) {
+  setCards(prev => [...prev, inserted])
+} else {
+  loadAll(true)
+}
   } catch (e) {
     setErr(e?.message ?? String(e))
     // Fallback refresh in case state diverged
@@ -424,6 +424,21 @@ const commanderColors = useMemo(() => {
     const { error } = await supabase.from('deck_cards').delete().eq('id', row.id)
     if (error) setErr(error.message)
   }
+
+async function updateTags(row, tags) {
+  const snap = row?.card_snapshot || {}
+  const nextSnap = { ...snap, user_tags: Array.isArray(tags) ? tags : [] }
+
+  // Optimistic update
+  setCards(prev => prev.map(r => (r.id === row.id ? { ...r, card_snapshot: nextSnap } : r)))
+
+  const { error } = await supabase.from('deck_cards').update({ card_snapshot: nextSnap }).eq('id', row.id)
+  if (error) {
+    setErr(error.message)
+    loadAll(true)
+  }
+}
+
 
   function findCardRowById(id) {
     return cards.find(r => r.id === id)
@@ -619,7 +634,7 @@ if (existingCommander && fromCol !== commanderColId) {
   }
 
   
-  async function openEdhrecRecs() {
+  async async function openEdhrecRecs() {
     await copyDecklist()
     window.open('https://edhrec.com/recs', '_blank', 'noopener,noreferrer')
     setErr('Decklist copied to clipboard. Paste it into EDHREC Recs.')
@@ -634,16 +649,65 @@ if (existingCommander && fromCol !== commanderColId) {
     const slug = slugifyEdhrec(cmdName)
     window.open(`https://edhrec.com/commanders/${slug}/staples`, '_blank', 'noopener,noreferrer')
   }
-
   function openPrintSheets() {
-    const imgs = []
-    for (const r of cards) {
-      const snap = r.card_snapshot || {}
-      const url = scryfallImage(snap)
-      if (!url) continue
-      const qty = Math.max(1, r.qty || 1)
-      for (let i = 0; i < qty; i++) imgs.push({ name: snap.name || 'Card', url })
+    try {
+      const imgs = []
+      for (const r of cards) {
+        const snap = r.card_snapshot || {}
+        const url = scryfallImage(snap)
+        if (!url) continue
+        const qty = Math.max(1, r.qty || 1)
+        for (let i = 0; i < qty; i++) imgs.push({ name: snap.name || 'Card', url })
+      }
+      if (!imgs.length) {
+        setErr('No card images available to print.')
+        return
+      }
+
+      const perPage = 9
+      const pages = []
+      for (let i = 0; i < imgs.length; i += perPage) pages.push(imgs.slice(i, i + perPage))
+
+      const pageHtml = pages.map(page => {
+        const cells = page.map(it => `<div class="cell"><img src="${it.url}" alt="${it.name}"/></div>`).join('')
+        return `<div class="page"><div class="grid">${cells}</div></div>`
+      }).join('')
+
+      const html = `<!doctype html>
+<html><head><meta charset="utf-8"/>
+<title>Proxy Sheets</title>
+<style>
+  body{ margin:0; padding:18px; font-family: ui-sans-serif, system-ui; background:#fff; color:#111;}
+  .toolbar{ position: sticky; top:0; background:#fff; padding:10px 0; display:flex; gap:10px; align-items:center; z-index: 10;}
+  .btn{ padding:8px 12px; border:1px solid #ddd; border-radius:10px; background:#f7f7f7; cursor:pointer; }
+  .page{ page-break-after: always; margin: 12px 0; }
+  .grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .cell{ border:1px solid #ddd; border-radius:10px; overflow:hidden; }
+  img{ width:100%; height:auto; display:block; }
+  @media print { .toolbar{ display:none; } body{ padding:0; } }
+</style>
+</head><body>
+  <div class="toolbar">
+    <button class="btn" onclick="window.print()">Print</button>
+    <button class="btn" onclick="window.close()">Close</button>
+    <div style="opacity:.7;font-size:12px;">Cards: ${imgs.length}</div>
+  </div>
+  ${pageHtml}
+</body></html>`
+
+      const w = window.open('', '_blank', 'noopener,noreferrer')
+      if (!w) {
+        setErr('Popup blocked. Allow popups to print sheets.')
+        return
+      }
+      w.document.open()
+      w.document.write(html)
+      w.document.close()
+    } catch (e) {
+      setErr(e?.message ?? String(e))
     }
+  }
+
     if (!imgs.length) {
       setErr('No card images available to print.')
       return
@@ -685,26 +749,6 @@ if (existingCommander && fromCol !== commanderColId) {
     w.document.open()
     w.document.write(html)
     w.document.close()
-  }
-
-  async function fetchScryfallByName(name) {
-  const url = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`Card not found: ${name}`)
-  return await res.json()
-}
-
-async function quickAddByName(name, qty = 1) {
-  try {
-    setErr('')
-    const card = await fetchScryfallByName(name)
-    const type = (card?.type_line || '').toLowerCase()
-    const targetName = type.includes('land') ? 'Lands' : categorizeByType(snapshotScryfallCard(card)) || 'Creatures'
-    const col = columns.find(c => (c.name || '').toLowerCase() === targetName.toLowerCase()) || columns.find(c => (c.name || '').toLowerCase() === 'lands')
-    if (!col) throw new Error('No column found to add this card.')
-    await addCardToDeck(card, col.id, qty)
-  } catch (e) {
-    setErr(e?.message ?? String(e))
   }
 }
 
@@ -763,7 +807,7 @@ async function findCombos() {
 
   if (loading) {
     return (
-      <div className="grid">
+      <div className="deckPage">
         <div className="panel">Loading…</div>
         <div className="panel">Loading…</div>
       </div>
@@ -813,7 +857,17 @@ const activeRow = activeDragId ? findCardRowById(activeDragId) : null
         onImport={importDecklist}
       />
 
-      <div className="grid">
+      
+<CardDetailModal
+  open={detailOpen}
+  cardRow={detailRow}
+  onClose={() => setDetailOpen(false)}
+  onInc={inc}
+  onDec={dec}
+  onRemove={remove}
+  onUpdateTags={updateTags}
+/>
+<div className="deckPage">
         <div>
           <div className="panel">
             <div className="row" style={{ alignItems: 'center' }}>
@@ -830,56 +884,54 @@ const activeRow = activeDragId ? findCardRowById(activeDragId) : null
               </div>
 
               
-<div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-  <button
-    className="btn primary"
-    onClick={() => { setSearchPreset(''); setSearchOpen(true) }}
-  >
-    Search cards
-  </button>
-  <button
-    className="btn"
-    onClick={() => { setSearchPreset('type:vehicle'); setSearchOpen(true) }}
-  >
-    Add Vehicles
-  </button>
-<div className="quickAddGroup">
-  <div className="muted" style={{ fontSize: 12, fontWeight: 800 }}>Quick add</div>
-  <div className="quickAddRow">
-    <input
-      className="input"
-      style={{ width: 84 }}
-      type="number"
-      min="1"
-      value={quickLandQty}
-      onChange={(e) => setQuickLandQty(Math.max(1, Number(e.target.value || 1)))}
-      title="Quantity"
-    />
-    {['Plains','Island','Swamp','Mountain','Forest','Wastes'].map(n => (
-      <button key={n} className="btn" onClick={() => quickAddByName(n, quickLandQty)}>{n}</button>
-    ))}
-    <span className="muted" style={{ fontSize: 12, marginLeft: 6 }}>Staples:</span>
-    {['Sol Ring','Arcane Signet','Command Tower'].map(n => (
-      <button key={n} className="btn" onClick={() => quickAddByName(n, 1)}>{n}</button>
-    ))}
+<div className="topActions">
+  <div className="actionLeft">
+    <button className="btn primary" onClick={() => { setSearchPreset(''); setSearchOpen(true) }}>Search cards</button>
+    <button className="btn" onClick={() => { setSearchPreset('type:vehicle'); setSearchOpen(true) }}>Add Vehicles</button>
+    <button className="btn" onClick={() => setImportOpen(true)}>Import</button>
+    <button className="btn" onClick={openPrintSheets}>Print sheets</button>
+    <button className="btn" onClick={openEdhrecRecs} disabled={!decklistText}>EDHREC Recs</button>
+    <button className="btn" onClick={openEdhrecStaples} disabled={!commanderRows?.length}>EDHREC Staples</button>
+  </div>
+  <div className="actionRight">
+    <button className="btn" onClick={copyDecklist} disabled={!decklistText}>Copy decklist</button>
+    <button className="btn" onClick={openSpellbook} disabled={!decklistText}>Open Spellbook</button>
+    <button className="btn" onClick={() => setView(view === 'board' ? 'list' : 'board')}>{view === 'board' ? 'List view' : 'Board view'}</button>
+    <button className="btn" onClick={() => loadAll(true)}>Refresh</button>
   </div>
 </div>
 
-  <button className="btn" onClick={() => setImportOpen(true)}>Import</button>
-  <button className="btn" onClick={openPrintSheets}>Print sheets</button>
-  <button className="btn" onClick={openEdhrecRecs} disabled={!decklistText}>EDHREC Recs</button>
-  <button className="btn" onClick={openEdhrecStaples} disabled={!commanderRows?.length}>EDHREC Staples</button>
-  <button className="btn" onClick={copyDecklist} disabled={!decklistText}>Copy decklist</button>
-  <button className="btn" onClick={openSpellbook} disabled={!decklistText}>Open Spellbook</button>
-  <button className="btn" onClick={() => setView(view === 'board' ? 'list' : 'board')}>View: {view === 'board' ? 'Board' : 'List'}</button>
-  <button className="btn" onClick={loadAll}>Refresh</button>
-</div>
+          {view === 'board' ? (
+            <div className="panel">
+              <div className="boardWrap">
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCorners}
+                  onDragStart={onDragStart}
+                  onDragCancel={onDragCancel}
+                  onDragEnd={onDragEnd}
+                >
+                  <div className="board">
+                    {columns.map(col => (
+                      <BoardColumn key={col.id}
+                        column={col}
+                        cards={cardsByColumn[col.id] || []}
+                         onOpen={openDetail} />
+                    ))}
+                  </div>
+                  <DragOverlay>
+                    {activeRow ? (
+                      <div className="dragOverlay">
+                        {activeRow?.card_snapshot ? (
+                          <img src={scryfallImage(activeRow.card_snapshot)} alt={activeRow.card_snapshot?.name || 'card'} />
+                        ) : null}
+                      </div>) : null}
+                  </DragOverlay>
+                </DndContext>
+              </div>
             </div>
 
-            {err ? <div className="tag" style={{ marginTop: 10 }}>{err}</div> : null}
-          </div>
-
-          <div className="panel" style={{ marginTop: 14 }}>
+            <div className="panel" className="statsBottom">
           <div className="row" style={{ alignItems: 'center' }}>
             <h3 style={{ margin: 0 }}>Deck stats</h3>
             {saving ? <span className="tag">Saving…</span> : null}
@@ -971,38 +1023,8 @@ const activeRow = activeDragId ? findCardRowById(activeDragId) : null
             </div>
           )}
         </div>
-        </div>
 
-        <div>
-          {view === 'board' ? (
-            <div className="panel">
-              <div className="boardWrap">
-                <DndContext
-                  sensors={sensors}
-                  collisionDetection={closestCorners}
-                  onDragStart={onDragStart}
-                  onDragCancel={onDragCancel}
-                  onDragEnd={onDragEnd}
-                >
-                  <div className="board">
-                    {columns.map(col => (
-                      <BoardColumn key={col.id}
-                        column={col}
-                        cards={cardsByColumn[col.id] || []}
-                         onOpen={openDetail} />
-                    ))}
-                  </div>
-                  <DragOverlay>
-                    {activeRow ? (
-                      <div className="dragOverlay">
-                        {activeRow?.card_snapshot ? (
-                          <img src={scryfallImage(activeRow.card_snapshot)} alt={activeRow.card_snapshot?.name || 'card'} />
-                        ) : null}
-                      </div>) : null}
-                  </DragOverlay>
-                </DndContext>
-              </div>
-            </div>
+
           ) : (
           <div className="panel" style={{ marginTop: 14 }}>
             <div style={{ display: 'grid', gap: 12 }}>
