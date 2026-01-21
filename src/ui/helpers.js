@@ -143,11 +143,6 @@ export function slugifyEdhrec(name) {
     .replace(/(^-|-$)/g, '')
 }
 
-export function isBasicLand(cardSnap) {
-  const tl = (cardSnap?.type_line || '').toLowerCase()
-  return tl.includes('basic land')
-}
-
 export function oracleAllowsAnyNumber(cardSnap) {
   const t = (cardSnap?.oracle_text || '').toLowerCase()
   return t.includes('a deck can have any number') || t.includes('any number of cards named')
