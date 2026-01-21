@@ -1,42 +1,76 @@
 import React from 'react'
-import { scryfallPriceUSD, formatMoney, scryfallImageSmall } from './helpers'
+import { scryfallPriceUSD, formatMoney } from './helpers'
 
 function rarityToKeyrune(rarity) {
   const r = (rarity || '').toLowerCase()
-  if (r==='mythic') return 'ss-mythic'
-  if (r==='rare') return 'ss-rare'
-  if (r==='uncommon') return 'ss-uncommon'
+  if (r === 'mythic') return 'ss-mythic'
+  if (r === 'rare') return 'ss-rare'
+  if (r === 'uncommon') return 'ss-uncommon'
   return 'ss-common'
 }
 
-export default function CardTile({ cardRow, onInc, onDec, onRemove }) {
+export function getSnapshotImage(snap, size = 'normal') {
+  if (!snap) return ''
+  if (snap?.image_uris?.[size]) return snap.image_uris[size]
+  const face = snap?.card_faces?.find(f => f?.image_uris?.[size])?.image_uris
+  return face?.[size] || ''
+}
+
+export default function CardTile({ cardRow, onInc, onDec, onRemove, compact = false, dupeInfo = null, onFixDuplicate = null }) {
   const snap = cardRow.card_snapshot || {}
   const set = (snap.set || '').toLowerCase()
   const rarityClass = rarityToKeyrune(snap.rarity)
   const price = scryfallPriceUSD(snap)
-  const img = scryfallImageSmall(snap)
+  const img = getSnapshotImage(snap, compact ? 'small' : 'normal')
+
+  // Compact mode is used in DragOverlay
+  if (compact) {
+    return (
+      <div className="cardTileOverlay">
+        {img ? <img className="cardArtOverlay" src={img} alt={snap.name} /> : null}
+        <div className="cardOverlayMeta">
+          <div className="row" style={{ alignItems: 'center' }}>
+            <div style={{ fontWeight: 900 }}>{snap.name}</div>
+            <span className="tag">x{cardRow.qty || 1}</span>
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>{snap.mana_cost || ''}</div>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className="cardTile">
-      <div className="cardArt" aria-hidden="true">
-        {img ? <img src={img} alt="" /> : null}
+    <div className="cardTileNew" title={snap.name}>
+      <div className="cardArtLarge">
+        {img ? <img src={img} alt={snap.name} /> : null}
+        <div className="cardArtBadges">
+          <span className="qtyBadge">x{cardRow.qty}</span>
+          {set ? <i className={`ss ss-${set} ${rarityClass}`} /> : null}
+          {price ? <span className="priceBadge">${formatMoney(price)}</span> : null}
+        </div>
       </div>
 
-      <div className="cardMeta">
-        <div className="cardName" title={snap.name}>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{snap.name}</span>
-          {set ? <i className={`ss ss-${set} ${rarityClass}`} title={(snap.set_name || set).toUpperCase()} /> : null}
-          {price ? <span className="pill">${formatMoney(price)}</span> : null}
+      <div className="cardTileMeta">
+        <div className="cardTitle">{snap.name}</div>
+        <div className="muted cardSub">
+          {snap.mana_cost || ''} {snap.type_line ? `• ${snap.type_line}` : ''}
         </div>
-        <div className="cardLine">{snap.mana_cost || ''} {snap.type_line ? `• ${snap.type_line}` : ''}</div>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, gap: 8 }}>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <button className="btn" onClick={() => onDec?.(cardRow)}>-</button>
-            <span className="qty">x{cardRow.qty}</span>
-            <button className="btn" onClick={() => onInc?.(cardRow)}>+</button>
+        <div className="cardTileActions">
+          <div className="qtyControls">
+            <button className="btn btnTiny" onClick={() => onDec?.(cardRow)} type="button">-</button>
+            <button className="btn btnTiny" onClick={() => onInc?.(cardRow)} type="button">+</button>
           </div>
-          <button className="btn danger" onClick={() => onRemove?.(cardRow)}>Remove</button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {dupeInfo ? (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span className="tag danger">x{dupeInfo.total} limit {dupeInfo.limit === Infinity ? '∞' : dupeInfo.limit}</span>
+                <button className="btn btnTiny" onClick={() => onFixDuplicate?.(cardRow, dupeInfo.limit)} type="button">Fix</button>
+              </div>
+            ) : null}
+
+            <button className="btn btnTiny danger" onClick={() => onRemove?.(cardRow)} type="button">Remove</button>
+          </div>
         </div>
       </div>
     </div>
